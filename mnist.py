@@ -1,156 +1,109 @@
-import os
+import array
+import random
+import os.path
 import struct
 import gzip
 import urllib.request
 
-from array import array as pyarray
-from numpy import append, array, int8, uint8, zeros
+from collections import namedtuple
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+MNIST = namedtuple('MNIST', ['N', 'labels', 'images'])
+MNIST_URL = 'http://yann.lecun.com/exdb/mnist/'
+
+TRAIN = ('train-images-idx3-ubyte', 'train-labels-idx1-ubyte')
+TEST = ('t10k-images-idx3-ubyte', 't10k-labels-idx1-ubyte')
 
 
-url = 'http://yann.lecun.com/exdb/mnist/'
-last_percent_reported = None
+def maybe_download(url, *files, data_dir='./data'):
+    """Download a file if not present in the data dir"""
+    if not os.path.exists(data_dir):
+        os.mkdir(data_dir)
 
+    def maybe_extract(filename):
+        if os.path.exists(name) or not filename:
+            return
 
-def maybe_download(*files):
-    """Download a file if not present"""
-    if not os.path.exists('./data'):
-        os.mkdir('./data')
+        f = open(name, 'wb')
+        f.write(gzip.GzipFile(filename).read())
+        f.close()
 
-    for file in files:
-        name = 'data/%s' % file[:-3]
+    def maybe_dl(f):
+        filename = None
         if not os.path.exists(name):
-            print('Attempting to download:', file)
-            filename, _ = urllib.request.urlretrieve(url + file)
-            print('Download Complete!')
+            print('Attempting to download:', f)
+            filename, _ = urllib.request.urlretrieve(url + f)
 
-            f = open(name, 'wb')
-            f.write(gzip.GzipFile(filename).read())
-            f.close()
+        return filename
+
+    for f in files:
+        name = os.path.join(data_dir, f[:-3])
+
+        filename = maybe_dl(f)
+        maybe_extract(filename)
 
 
-def load_mnist(dataset="training", digits=None, path='./data', asbytes=False,
-               selection=None, return_labels=True, return_indices=False):
+def load_mnist(dataset='test', data_dir='./data', asbytes=True):
     """
-    Loads MNIST files into a 3D numpy array.
-
-    Parameters
-    ----------
-    dataset : str
-        Either "training" or "testing", depending on which dataset you want to
-        load.
-    digits : list
-        Integer list of digits to load. The entire database is loaded if set to
-        ``None``. Default is ``None``.
-    path : str
-        Path to your MNIST datafiles. The default is ``None``, which will try
-        to take the path from your environment variable ``MNIST``. The data can
-        be downloaded from http://yann.lecun.com/exdb/mnist/.
+    dataset: string
+        The dataset to load :(test, train)
+    data_dir: string
+        the directory where to find images and labels
     asbytes : bool
-        If True, returns data as ``numpy.uint8`` in [0, 255] as opposed to
-        ``numpy.float64`` in [0.0, 1.0].
-    selection : slice
-        Using a `slice` object, specify what subset of the dataset to load. An
-        example is ``slice(0, 20, 2)``, which would load every other digit
-        until--but not including--the twentieth.
-    return_labels : bool
-        Specify whether or not labels should be returned. This is also a speed
-        performance if digits are not specified, since then the labels file
-        does not need to be read at all.
-    return_indicies : bool
-        Specify whether or not to return the MNIST indices that were fetched.
-        This is valuable only if digits is specified, because in that case it
-        can be valuable to know how far
-        in the database it reached.
+        returns data as a numpy.uint8 instead of a numpy.float64
 
     Returns
     -------
-    images : ndarray
-		Image data of shape ``(N, rows, cols)``, where ``N`` is the number of
-		images. If neither labels nor inices are returned, then this is returned
-		directly, and not inside a 1-sized tuple.
-    labels : ndarray
-		Array of size ``N`` describing the labels. Returned only if
-		``return_labels`` is `True`, which is default.
-    indices : ndarray
-        The indices in the database that were returned.
-
-    Examples
-    --------
-    Assuming that you have downloaded the MNIST database and set the
-    environment variable ``$MNIST`` point to the folder, this will load all
-    images and labels from the training set:
-
-    >>> images, labels = load_mnist('training') # doctest: +SKIP
-
-    Load 100 sevens from the testing set:
-
-    >>> sevens = load_mnist('testing', digits=[7], selection=slice(0, 100), return_labels=False) # doctest: +SKIP
-
+    images : ndarray (N, rows, cols)
+    labels : ndarray (N)
     """
 
-    # The files are assumed to have these names and should be found in 'path'
-    files = {
-        'training': ('train-images-idx3-ubyte', 'train-labels-idx1-ubyte'),
-        'testing': ('t10k-images-idx3-ubyte', 't10k-labels-idx1-ubyte'),
-    }
+    files = {'test': TEST, 'train': TRAIN}
+    dtype = {True: np.uint8, False: np.float64}[asbytes]
 
-    if path is None:
-        try:
-            path = os.environ['MNIST']
-        except KeyError:
-            raise ValueError("Unspecified path requires environment variable $MNIST to be set")
+    # The files are assumed to have these names and should be found in 'path'
+    if not os.path.exists(data_dir):
+        raise ValueError('Directory %s does not exist')
 
     try:
-        images_fname = os.path.join(path, files[dataset][0])
-        labels_fname = os.path.join(path, files[dataset][1])
+        p_images = os.path.join(data_dir, files[dataset][0])
+        p_labels = os.path.join(data_dir, files[dataset][1])
     except KeyError:
-        raise ValueError("Data set must be 'testing' or 'training'")
+        raise ValueError('dataset %s should be `test` or `train`' % dataset)
 
-    # We can skip the labels file only if digits aren't specified and labels aren't asked for
-    labels_raw = None
-    if return_labels or digits is not None:
-        flbl = open(labels_fname, 'rb')
-        _, _ = struct.unpack(">II", flbl.read(8))
-        labels_raw = pyarray("b", flbl.read())
-        flbl.close()
+    for f in (p_images, p_labels):
+        if not os.path.exists(f):
+            raise ValueError('%s does not exist' % f)
 
-    fimg = open(images_fname, 'rb')
-    magic_nr, size, rows, cols = struct.unpack(">IIII", fimg.read(16))
-    images_raw = pyarray("B", fimg.read())
-    fimg.close()
+    N, labels, images = 0, None, None
 
-    if digits:
-        indices = [k for k in range(size) if labels_raw[k] in digits]
-    else:
-        indices = range(size)
+    with open(p_labels, 'rb') as f_labels:
+        f_labels.seek(8)
+        labels = np.array(array.array("b", f_labels.read()))
 
-    if selection:
-        indices = indices[selection]
-    N = len(indices)
+    with open(p_images, 'rb') as f_images:
+        _, N, rows, cols = struct.unpack(">IIII", f_images.read(16))
+        images = np.array(array.array("b", f_images.read()), dtype=dtype)
+        images = np.reshape(images, (N, rows, cols))
 
-    images = zeros((N, rows, cols), dtype=uint8)
+    return MNIST(N, labels, images)
 
-    if return_labels:
-        labels = zeros((N), dtype=int8)
-    for i, index in enumerate(indices):
-        images[i] = array(images_raw[ indices[i]*rows*cols : (indices[i]+1)*rows*cols ]).reshape((rows, cols))
-        if return_labels:
-            labels[i] = labels_raw[indices[i]]
+def display_samples(dataset):
+    plt.figure(1)
+    for i in range(9):
+        k = random.sample(np.where(dataset.labels == i)[0].tolist(), 1)[0]
 
-    if not asbytes:
-        images = images.astype(float)/255.0
+        plt.subplot(int('33%s' % (i + 1)))
+        plt.imshow(dataset.images[k], cmap='gray')
+        plt.grid(True)
 
-    ret = (images,)
-    if return_labels:
-        ret += (labels,)
-    if return_indices:
-        ret += (indices,)
-    if len(ret) == 1:
-        return ret[0] # Don't return a tuple of one
-    else:
-        return ret
+    plt.show()
 
-maybe_download('train-images-idx3-ubyte.gz', 'train-labels-idx1-ubyte.gz')
-maybe_download('t10k-images-idx3-ubyte.gz', 't10k-labels-idx1-ubyte.gz')
+maybe_download(MNIST_URL, *(f + '.gz' for f in TRAIN))
+maybe_download(MNIST_URL, *(f + '.gz' for f in TEST))
 
-images, labels = load_mnist('training')
+train_dataset = load_mnist('train')
+test_dataset = load_mnist('test')
+display_samples(test_dataset)
